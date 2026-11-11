@@ -33,8 +33,30 @@ try:  # Beaker tracing is a dev tool: current_trace() records nothing outside a 
 except ImportError:
     current_trace = None
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 MODEL = 'claude-opus-5-5'
+
+
+class _NoCall:
+    """Stands in for a Beaker trace call when no capture is running."""
+
+    def output(self, *args, **kwargs):
+        pass
+
+    def usage(self, *args, **kwargs):
+        pass
+
+
+@asynccontextmanager
+async def traced_call(operation, provider, model, input_messages):
+    """One model call as a Beaker trace span (nothing is recorded outside a Beaker capture)."""
+    if current_trace is None:
+        yield _NoCall()
+    else:
+        async with current_trace().model_call(operation=operation, provider=provider, model=model,
+                                              input_messages=input_messages) as call:
+            yield call
 
 
 def _price(inp, out, read=None, write_5m=None, write_1h=None):
@@ -80,6 +102,10 @@ PRICES = {  # USD per million tokens, list prices as of Sept 2026; Flex is half 
     'openrouter:anthropic/claude-opus-4.1': _price(15, 75),
     'openrouter:anthropic/claude-sonnet-4': _price(3, 15),
     'o3': _openai(2, 8, explicit_cache=False),
+    # OpenRouter list prices checked 2026-11-11; where it reports a call's cost, that is used instead
+    'gpt-6.1-terra': _price(1, 5, read=0.05, write_5m=1.25, write_1h=1.25),  # ASSUMED: cache write at 1.25x input
+    'openrouter:z-ai/glm-5.3-flash': _price(0.0399, 0.0784, read=0.03, write_5m=0.0399, write_1h=0.0399),
+    'openrouter:google/gemini-3.8-flash': _price(0.825, 4.125, read=0.0825, write_5m=0.825, write_1h=0.825),
 }
 
 # How each model is driven, where it differs from the current default (adaptive thinking with an
@@ -106,6 +132,9 @@ MODELS = {
     'gpt-5': {'context': False, 'explicit_cache': False, 'memory': 'replies', 'window': 400_000},  # checked Oct 1: replies only
     'openrouter:anthropic/claude-opus-4.1': {'thinking': 'budget', 'memory': 'replies', 'window': 200_000},
     'openrouter:anthropic/claude-sonnet-4': {'thinking': 'budget', 'memory': 'replies', 'window': 200_000},
+    # open-weight and other models over OpenRouter chat completions: reasoning effort, replies only, no cache markers
+    'openrouter:z-ai/glm-5.3-flash': {'thinking': 'effort', 'explicit_cache': False, 'memory': 'replies', 'window': 1_000_000},
+    'openrouter:google/gemini-3.8-flash': {'thinking': 'effort', 'explicit_cache': False, 'memory': 'replies', 'window': 1_000_000},
     'gpt-4o': {'reasoning': False, 'context': False, 'explicit_cache': False, 'memory': 'replies',
                'window': 128_000, 'max_output': 16_384},  # no reasoning; its output limit is 16K
 }
@@ -304,7 +333,12 @@ class ClaudeConversation(_Base):
             self.ledger.check()
             start = time.monotonic()
             async with (self.semaphore if commit else NO_LIMIT):  # probes never wait behind game turns
-                r = await self._stream(messages, low)
+                async with traced_call(f'{self.label}:{(meta or {}).get("kind", "turn")}', 'anthropic', self.model,
+                                       messages) as call:
+                    r = await self._stream(messages, low)
+                    call.output([b.model_dump(exclude_none=True) for b in r.content])
+                    call.usage(input_tokens=r.usage.input_tokens, output_tokens=r.usage.output_tokens,
+                               cached_input_tokens=r.usage.cache_read_input_tokens)
             usage = r.usage.model_dump(exclude_none=True)
             spent = cost(self.model, usage)
             self.ledger.add(spent, label=self.label)
@@ -465,17 +499,13 @@ class OpenAIConversation(_Base):
                 body['service_tier'] = 'flex'
             start = time.monotonic()
             async with (self.semaphore if commit else NO_LIMIT):
-                if current_trace is None:
+                async with traced_call(f'{self.label}:{(meta or {}).get("kind", "turn")}', 'openai', self.model,
+                                       messages) as call:
                     raw = await self._request(body)
-                else:
-                    async with current_trace().model_call(operation=f'{self.label}:{(meta or {}).get("kind", "turn")}',
-                                                          provider='openai', model=self.model,
-                                                          input_messages=messages) as call:
-                        raw = await self._request(body)
-                        call.output(raw.get('output'))
-                        usage_raw = raw.get('usage') or {}
-                        call.usage(input_tokens=usage_raw.get('input_tokens'), output_tokens=usage_raw.get('output_tokens'),
-                                   cached_input_tokens=(usage_raw.get('input_tokens_details') or {}).get('cached_tokens'))
+                    call.output(raw.get('output'))
+                    usage_raw = raw.get('usage') or {}
+                    call.usage(input_tokens=usage_raw.get('input_tokens'), output_tokens=usage_raw.get('output_tokens'),
+                               cached_input_tokens=(usage_raw.get('input_tokens_details') or {}).get('cached_tokens'))
             u = raw.get('usage') or {}
             d = u.get('input_tokens_details') or {}
             read, write = d.get('cached_tokens', 0), d.get('cache_write_tokens', 0)
@@ -521,11 +551,12 @@ OPENAI_PREFIXES = ('gpt-', 'o1', 'o3', 'o4')
 
 
 class OpenRouterConversation(_Base):
-    """Older Claude models still served only through OpenRouter (Amazon Bedrock): chat completions with a
-    thinking budget (three quarters of the ceiling, as for the other budget-thinking Claude models) and
-    Anthropic prompt caching. These endpoints take no structured-output setting, so the reply schema is
-    stated in the system prompt and the JSON is parsed (a malformed reply is retried). The API drops
-    earlier thinking from the context, so these models remember their replies only."""
+    """Models served through OpenRouter chat completions: older Claude models (Amazon Bedrock) with a thinking
+    budget (three quarters of the ceiling) and Anthropic prompt caching, and open-weight or other models
+    (spec thinking 'effort', no cache markers) with a reasoning effort. These endpoints take no
+    structured-output setting, so the reply schema is stated in the system prompt and the JSON is parsed
+    (a malformed reply is retried). The API drops earlier thinking from the context, so these models
+    remember their replies only."""
     URL = 'https://openrouter.ai/api/v1/chat/completions'
 
     def __init__(self, system, schema, **kw):
@@ -536,8 +567,14 @@ class OpenRouterConversation(_Base):
         self.slug = self.model.split(':', 1)[1]
         rules = system + ('\n\nReply with one JSON object and nothing else (no code fence), matching this JSON '
                           'schema:\n' + json.dumps(schema))
-        self.messages = [{'role': 'system', 'content': [{'type': 'text', 'text': rules,
-                                                         'cache_control': {'type': 'ephemeral'}}]}]
+        self.cache_markers = spec(self.model)['explicit_cache']
+        block = {'type': 'text', 'text': rules}
+        if self.cache_markers:
+            block['cache_control'] = {'type': 'ephemeral'}
+        self.messages = [{'role': 'system', 'content': [block]}]
+
+    def _reserved_post(self, body):  # what OpenAIConversation._request calls; no house budget applies here
+        return self._post(body)
 
     def _post(self, body):
         req = urllib.request.Request(self.URL, data=json.dumps(body).encode(), method='POST',
@@ -557,17 +594,28 @@ class OpenRouterConversation(_Base):
         truncations = 0
         for attempt in range(4):
             self.ledger.check()
-            for m in messages[1:]:  # one cache breakpoint on the newest user turn (plus the system prompt)
-                if m['role'] == 'user':
-                    m['content'][-1].pop('cache_control', None)
-            messages[-1]['content'][-1]['cache_control'] = {'type': 'ephemeral'}
+            if self.cache_markers:  # one cache breakpoint on the newest user turn (plus the system prompt)
+                for m in messages[1:]:
+                    if m['role'] == 'user':
+                        m['content'][-1].pop('cache_control', None)
+                messages[-1]['content'][-1]['cache_control'] = {'type': 'ephemeral'}
+            if spec(self.model)['thinking'] == 'budget':
+                reasoning = {'max_tokens': 1024 if low else self.max_tokens * 3 // 4}
+            else:
+                reasoning = {'effort': self.turn_effort(low)}
             body = {'model': self.slug, 'messages': messages, 'max_tokens': self.max_tokens,
-                    'reasoning': {'max_tokens': 1024 if low else self.max_tokens * 3 // 4},
-                    'usage': {'include': True},
+                    'reasoning': reasoning, 'usage': {'include': True},
                     'provider': {'require_parameters': True}}
             start = time.monotonic()
             async with (self.semaphore if commit else NO_LIMIT):
-                raw = await self._request(body)
+                async with traced_call(f'{self.label}:{(meta or {}).get("kind", "turn")}', 'openrouter', self.model,
+                                       messages) as call:
+                    raw = await self._request(body)
+                    choice_raw = (raw.get('choices') or [{}])[0].get('message')
+                    usage_raw = raw.get('usage') or {}
+                    call.output(choice_raw)
+                    call.usage(input_tokens=usage_raw.get('prompt_tokens'), output_tokens=usage_raw.get('completion_tokens'),
+                               cached_input_tokens=(usage_raw.get('prompt_tokens_details') or {}).get('cached_tokens'))
             u = raw.get('usage') or {}
             read = (u.get('prompt_tokens_details') or {}).get('cached_tokens', 0)
             write = (u.get('prompt_tokens_details') or {}).get('cache_write_tokens', 0)

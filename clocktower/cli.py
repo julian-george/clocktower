@@ -36,9 +36,8 @@ from .agents import ModelSeat, RandomSeat
 from .characters import MINIONS
 from .game import ALL_NAMES, Game
 from .llm import MODEL, Ledger, conversation, limiter, make_client, spec
+from .player import scaffold
 from .prompts import player_system
-
-PLAYBOOK_PATH = Path(__file__).parent / 'playbook.md'  # the editable advice `--playbook-team` gives one team
 from .schema import player_schema
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -109,7 +108,22 @@ def seat_models(g, args, seed):
                 continue  # that character isn't in this game
             effort = (args.evil_effort if p.evil else args.good_effort) or args.effort
             out[p.name] = _model(rest, effort)
+    if getattr(args, 'focal_seat', None) is not None:
+        out[g.players[args.focal_seat].name] = _model(args.focal_model, args.effort)
     return out
+
+
+class FocalConversation:
+    """The focal seat's conversation: each turn's text goes through the player harness (player/scaffold.py) first."""
+
+    def __init__(self, conversation):
+        self.conversation = conversation
+
+    async def send(self, text, meta=None, commit=True):
+        return await self.conversation.send(scaffold.wrap_turn(text, (meta or {}).get('kind')), meta, commit)
+
+    def __getattr__(self, name):
+        return getattr(self.conversation, name)
 
 
 def build(args, seed, out, env: Shared | None = None, humans=None, minion=None):
@@ -141,11 +155,16 @@ def build(args, seed, out, env: Shared | None = None, humans=None, minion=None):
         game.meta['models'][name] = model if effort == args.effort else f'{model}@{effort}'
         if model == 'random':
             return RandomSeat(name, random.Random(bots.random()), names)
-        playbook = PLAYBOOK_PATH.read_text() if getattr(args, 'playbook_team', None) == team else ''
-        system = player_system(len(names), spec(model)['memory'], args.private_beats, playbook)
+        system = player_system(len(names), spec(model)['memory'], args.private_beats)
+        focal = getattr(args, 'focal_seat', None) is not None and name == names[args.focal_seat]
+        if focal:
+            system = scaffold.build_system(system)
+            game.meta['focal'] = {'seat': name, 'model': model}
         c = conversation(env.client, system, player_schema(names), label=name, ledger=env.ledger,
                          semaphore=env.semaphore, on_call=game.record_call, model=model, effort=effort,
                          max_tokens=args.max_output, ttl=ttl, flex=args.flex)
+        if focal:
+            c = FocalConversation(c)
         convs.append((name, c))
         return ModelSeat(c)
 
@@ -334,8 +353,10 @@ def main(argv=None):
             p.add_argument('--seat-model', action='append', metavar='SPEC',
                            help='per-seat override, repeatable: good:MODEL[:N], evil:MODEL[:N] (N seats of that '
                                 'team, picked by seed) or CHARACTER:MODEL (e.g. Imp:gpt-6-astra); MODEL@effort ok')
-            p.add_argument('--playbook-team', choices=('good', 'evil'),
-                           help='append clocktower/playbook.md to this team\'s system prompt (the other team gets none)')
+            p.add_argument('--focal-seat', type=int, metavar='INDEX',
+                           help='seating index of the one seat that runs --focal-model and the player harness '
+                                '(clocktower/player/); every other seat follows --model and the team options')
+            p.add_argument('--focal-model', help='model for the --focal-seat')
             p.add_argument('--max-output', type=int, default=8000,
                            help='per-turn output ceiling, thinking included, identical for every model')
             p.add_argument('--budget', type=float, default=1000.0, help='cap on total spend in games/ledger.jsonl')
@@ -363,6 +384,8 @@ def main(argv=None):
             # so a table's AI seats use the play server's own default (web.Settings.effort; PLAY_EFFORT)
             p.set_defaults(budget=100.0, effort=None)
     args = ap.parse_args(argv)
+    if getattr(args, 'focal_seat', None) is not None and not args.focal_model:
+        ap.error('--focal-seat needs --focal-model')
     if args.command == 'report':
         from .report import main as report
         report(args.paths)

@@ -27,13 +27,12 @@ MEMORY = {
 }
 
 
-def player_system(n=9, memory='reasoning', private_beats=6, playbook=''):
+def player_system(n=9, memory='reasoning', private_beats=6):
     """The player system prompt for an n-player game with `private_beats` beats of private time. `memory`
     says truthfully whether the model's own earlier thinking carries over ('reasoning') or only its replies
-    do ('replies', older models). A non-empty `playbook` is appended as extra advice (Beaker hillclimbing)."""
+    do ('replies', older models)."""
     return (_PLAYER_SYSTEM.replace('{N}', WORDS[n]).replace('{TEAMS}', _teams(n)).replace('{MEMORY}', MEMORY[memory])
-            .replace('{PW}', WORDS[private_beats]).replace('{P}', str(private_beats))
-            + (f'\n\nPLAYBOOK\n{playbook.strip()}' if playbook.strip() else ''))
+            .replace('{PW}', WORDS[private_beats]).replace('{P}', str(private_beats)))
 
 
 _PLAYER_SYSTEM = f"""You are one of {{N}} players in a game of Blood on the Clocktower, using the Trouble Brewing script. The game is played over text: a town square that everyone reads, plus private whispers. A Storyteller runs the game, gives out information at night and resolves abilities. Every other seat is a different player; you control only your own.

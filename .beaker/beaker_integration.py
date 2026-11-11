@@ -1,7 +1,8 @@
-"""Beaker integration: hillclimb clocktower/playbook.md, advice given to one team of gpt-6-luna players.
+"""Beaker integration: hillclimb the harness of one open-weight Clocktower player (clocktower/player/).
 
-A case is one deal (seed). It plays two games on that deal, every seat gpt-6-luna: one where the
-good team gets the playbook, one where the evil team does. The other team gets no playbook.
+A case is one deal (seed) and one focal seat. The focal seat plays with the open-weight model and the
+player harness Beaker edits; every other seat is a fixed mid-priced closed model. The score is whether
+the focal seat's team wins.
 """
 from __future__ import annotations
 
@@ -20,9 +21,11 @@ from beaker import (
     RetryableCaseError, RolloutRuntime, RunSetup, SetupRuntime, repository,
 )
 
-PLAYER_MODEL = "gpt-6-luna"
+FOCAL_MODEL = "openrouter:z-ai/glm-5.3-flash"
+OPPONENT_MODELS = "claude-sonnet-5-5,gpt-6.1-terra,openrouter:google/gemini-3.8-flash"
 CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
-PLAYBOOK_TEAMS = ("good", "evil")
+PLAYER_HARNESS_FILES = ("clocktower/player/playbook.md", "clocktower/player/scaffold.py")
+PROVIDER_KEY_NAMES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY")
 MAX_SPEND_PER_GAME_USD = 25
 MAX_TRANSCRIPT_CHARS_IN_TRACE = 100_000
 
@@ -30,13 +33,15 @@ MAX_TRANSCRIPT_CHARS_IN_TRACE = 100_000
 class Row(BaseModel):
     id: str = Field(min_length=1)
     seed: int
+    focal_seat: int = Field(ge=0, lt=10)  # tables seat at least 10 players
 
 
 class Setup(RunSetup[Row]):
     row_model = Row
 
     async def load_cases(self, row: Row, *, runtime: SetupRuntime) -> AsyncIterator[Case]:
-        yield Case(id=row.id, input={"seed": row.seed}, expected={"metric": "playbook team wins"})
+        yield Case(id=row.id, input={"seed": row.seed, "focal_seat": row.focal_seat},
+                   expected={"metric": "focal seat's team wins"})
 
 
 def run_clocktower_cli(arguments: list[str]) -> None:
@@ -51,54 +56,60 @@ def run_clocktower_cli(arguments: list[str]) -> None:
             raise RuntimeError(f"clocktower exited with {exit_request.code}") from exit_request
 
 
-async def play_game_with_playbook_for(team: str, seed: int, game_dir: Path, trace) -> dict:
+def team_of(character: str) -> str:
+    from clocktower.characters import DEMONS, MINIONS
+    return "evil" if character in (*MINIONS, *DEMONS) else "good"
+
+
+async def play_game(seed: int, focal_seat: int, game_dir: Path, trace) -> dict:
     # In-process (not a subprocess) so the model calls in clocktower/llm.py join Beaker's trace capture.
-    with trace.stage(f"{team}-playbook-game", inputs={"seed": seed, "playbook_team": team, "model": PLAYER_MODEL}):
+    with trace.stage("game", inputs={"seed": seed, "focal_seat": focal_seat, "focal_model": FOCAL_MODEL,
+                                     "opponent_models": OPPONENT_MODELS}):
         try:
             await asyncio.to_thread(run_clocktower_cli, [
-                "run", "--model", PLAYER_MODEL, "--seed", str(seed), "--playbook-team", team,
-                "--no-probes", "--budget", str(MAX_SPEND_PER_GAME_USD), "--out", str(game_dir),
+                "run", "--model", OPPONENT_MODELS, "--focal-seat", str(focal_seat), "--focal-model", FOCAL_MODEL,
+                "--seed", str(seed), "--no-probes", "--budget", str(MAX_SPEND_PER_GAME_USD), "--out", str(game_dir),
             ])
         except RuntimeError as game_failure:
-            raise RetryableCaseError(f"{team}-playbook game failed: {game_failure}") from game_failure
+            raise RetryableCaseError(f"game failed: {game_failure}") from game_failure
         result = json.loads((game_dir / "result.json").read_text())
         transcript = game_dir / "transcript.md"
         if transcript.exists():
-            trace.evidence(f"{team}-playbook-transcript", transcript.read_text()[:MAX_TRANSCRIPT_CHARS_IN_TRACE])
-        trace.evidence(f"{team}-playbook-result", result)
+            trace.evidence("transcript", transcript.read_text()[:MAX_TRANSCRIPT_CHARS_IN_TRACE])
+        trace.evidence("result", result)
     if result.get("winner") not in ("good", "evil"):
-        raise RetryableCaseError(f"{team}-playbook game ended without a winner: {result.get('reason')}")
-    return {"winner": result["winner"], "reason": result["reason"], "days": result["days"], "cost_usd": result["cost"]}
+        raise RetryableCaseError(f"game ended without a winner: {result.get('reason')}")
+    focal_name = result["focal"]["seat"]
+    focal_character = result["final"][focal_name]
+    return {"focal_seat": focal_seat, "focal_name": focal_name, "focal_character": focal_character,
+            "focal_team": team_of(focal_character), "winner": result["winner"], "reason": result["reason"],
+            "days": result["days"], "cost_usd": result["cost"]}
 
 
 async def run_case(*, case_input: dict, runtime: RolloutRuntime) -> CaseResult:
-    if not (CHECKOUT_ROOT / "clocktower" / "playbook.md").exists():
-        raise RuntimeError(f"clocktower/playbook.md missing under {CHECKOUT_ROOT}")
-    # The harness insists on a key; with none set, hosted provider routing supplies platform credentials.
-    os.environ.setdefault("OPENAI_API_KEY", "beaker-provider-routing")
-    seed = case_input["seed"]
-    with tempfile.TemporaryDirectory(prefix="clocktower-games-") as temp_dir:
-        games = await asyncio.gather(*(
-            play_game_with_playbook_for(team, seed, Path(temp_dir) / team, runtime.trace) for team in PLAYBOOK_TEAMS
-        ))
-    return CaseResult(output=dict(zip(PLAYBOOK_TEAMS, games)), output_kind="record")
+    for harness_file in PLAYER_HARNESS_FILES:
+        if not (CHECKOUT_ROOT / harness_file).exists():
+            raise RuntimeError(f"{harness_file} missing under {CHECKOUT_ROOT}")
+    # The harness insists on keys; with none set, hosted provider routing supplies platform credentials.
+    for key_name in PROVIDER_KEY_NAMES:
+        os.environ.setdefault(key_name, "beaker-provider-routing")
+    with tempfile.TemporaryDirectory(prefix="clocktower-game-") as temp_dir:
+        game = await play_game(case_input["seed"], case_input["focal_seat"], Path(temp_dir), runtime.trace)
+    return CaseResult(output=game, output_kind="record")
 
 
 async def score_case(*, case: Case, result: CaseResult, case_files_dir: Path) -> CaseScore:
-    field_scores, checks = {}, []
-    for team in PLAYBOOK_TEAMS:
-        game = result.output[team]
-        won = float(game["winner"] == team)
-        field_scores[f"{team}_playbook_win"] = won
-        checks.append(Check(
-            name=f"{team} team with the playbook wins", verdict="pass" if won else "fail",
-            expected=team, predicted=game["winner"], message=f"{game['reason']} (day {game['days']})",
-        ))
-    return CaseScore(objective=sum(field_scores.values()) / len(field_scores),
-                     field_scores=field_scores, checks=tuple(checks))
+    game = result.output
+    won = float(game["winner"] == game["focal_team"])
+    check = Check(
+        name="focal seat's team wins", verdict="pass" if won else "fail",
+        expected=game["focal_team"], predicted=game["winner"],
+        message=f"{game['focal_name']} played {game['focal_character']}: {game['reason']} (day {game['days']})",
+    )
+    return CaseScore(objective=won, field_scores={"focal_team_win": won}, checks=(check,))
 
 
 integration = Integration(
-    targets=repository(("clocktower/playbook.md",)),
+    targets=repository(PLAYER_HARNESS_FILES),
     run_setup=Setup, run_case=run_case, score_case=score_case,
 )

@@ -7,7 +7,7 @@
 # Add it only for shared run defaults; explicit CLI options override them.
 integrations:
   clocktower:
-    agent_key: clocktower-playbook
+    agent_key: clocktower-open-weight-harness
     entrypoint: beaker_integration:integration
     package_import_root: .beaker
     source_dir: .
