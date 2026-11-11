@@ -131,9 +131,12 @@ def build(args, seed, out, env: Shared | None = None, humans=None, minion=None):
     for the seats people play (web.py); the model 'random' is a free practice bot (RandomSeat)."""
     characters = args.characters.split(',') if args.characters else None
     names = ALL_NAMES[:len(characters) if characters else table_size(args.players, seed)]
+    probes = getattr(args, 'probes', False)
+    if getattr(args, 'probe_focal_only', False):
+        probes = {names[args.focal_seat]}  # the belief probe is the score: ask only the focal seat
     game = Game({}, None, names=names, seed=seed, private_beats=args.private_beats,
                 public_beats=args.public_beats, max_days=args.days, waves=args.waves, characters=characters,
-                minion=minion, out=out, probes=getattr(args, 'probes', False))
+                minion=minion, out=out, probes=probes)
     if env is None:  # sim: random players, no API
         rng = random.Random(seed + 1)
         game.seats = {n: RandomSeat(n, random.Random(rng.random()), names) for n in names}
@@ -367,6 +370,8 @@ def main(argv=None):
                            help='OpenAI Flex tier (half price, but throttled under load: calls can take minutes)')
             p.add_argument('--no-probes', dest='probes', action='store_false',
                            help='skip the out-of-game belief probes (probes.jsonl)')
+            p.add_argument('--probe-focal-only', action='store_true',
+                           help='with --focal-seat: belief-probe only the focal seat')
             p.add_argument('--workspace', default=os.environ.get('ANTHROPIC_WORKSPACE_ID', ''),
                            help='Anthropic workspace id sent with every request (default: $ANTHROPIC_WORKSPACE_ID; '
                                 'only needed if your organisation requires one)')

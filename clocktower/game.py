@@ -128,6 +128,8 @@ class Game:
         if not self.probes:
             return
         for p in self.g.players:
+            if self.probes is not True and p.name not in self.probes:
+                continue  # `probes` may be the set of seat names to ask
             seat = self.seats.get(p.name)
             if not hasattr(seat, 'probe'):
                 continue
