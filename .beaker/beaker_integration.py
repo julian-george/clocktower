@@ -22,7 +22,7 @@ from beaker import (
 )
 
 FOCAL_MODEL = "openrouter:z-ai/glm-5.3-flash"
-OPPONENT_MODELS = "claude-sonnet-5-5,gpt-6.1-terra,openrouter:google/gemini-3.8-flash"
+OPPONENT_MODELS = "claude-sonnet-5-5,gpt-6.1-terra,gpt-6-luna"
 CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
 PLAYER_HARNESS_FILES = ("clocktower/player/playbook.md", "clocktower/player/scaffold.py")
 PROVIDER_KEY_NAMES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY")
