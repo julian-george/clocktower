@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pyflakes>=3.2"]
+dev = ["pyflakes>=3.2", "beaker-sdk>=0.6.6"]
 
 [project.urls]
 Homepage = "https://clocktowerbench.com"

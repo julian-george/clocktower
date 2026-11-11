@@ -60,6 +60,7 @@ PRICES = {  # USD per million tokens, list prices as of Sept 2026; Flex is half 
     'claude-sonnet-4-5-20250929': _price(3, 15),
     'claude-haiku-4-5': _price(1, 5),
     'gpt-6-astra': _price(10, 50, read=1, write_5m=12.5, write_1h=12.5),
+    'gpt-6-luna': _price(2, 10, read=0.1, write_5m=2.5, write_1h=2.5),  # ASSUMED: copied from gpt-6.1-sol, not checked
     'gpt-6.1-sol': _price(2, 10, read=0.1, write_5m=2.5, write_1h=2.5),
     'gpt-6-sol': _price(2, 10, read=0.2, write_5m=2.5, write_1h=2.5),
     'gpt-5.6-sol': _price(4, 20, read=0.4, write_5m=5, write_1h=5),

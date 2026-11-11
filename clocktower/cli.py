@@ -37,6 +37,8 @@ from .characters import MINIONS
 from .game import ALL_NAMES, Game
 from .llm import MODEL, Ledger, conversation, limiter, make_client, spec
 from .prompts import player_system
+
+PLAYBOOK_PATH = Path(__file__).parent / 'playbook.md'  # the editable advice `--playbook-team` gives one team
 from .schema import player_schema
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -139,7 +141,8 @@ def build(args, seed, out, env: Shared | None = None, humans=None, minion=None):
         game.meta['models'][name] = model if effort == args.effort else f'{model}@{effort}'
         if model == 'random':
             return RandomSeat(name, random.Random(bots.random()), names)
-        system = player_system(len(names), spec(model)['memory'], args.private_beats)
+        playbook = PLAYBOOK_PATH.read_text() if getattr(args, 'playbook_team', None) == team else ''
+        system = player_system(len(names), spec(model)['memory'], args.private_beats, playbook)
         c = conversation(env.client, system, player_schema(names), label=name, ledger=env.ledger,
                          semaphore=env.semaphore, on_call=game.record_call, model=model, effort=effort,
                          max_tokens=args.max_output, ttl=ttl, flex=args.flex)
@@ -331,6 +334,8 @@ def main(argv=None):
             p.add_argument('--seat-model', action='append', metavar='SPEC',
                            help='per-seat override, repeatable: good:MODEL[:N], evil:MODEL[:N] (N seats of that '
                                 'team, picked by seed) or CHARACTER:MODEL (e.g. Imp:gpt-6-astra); MODEL@effort ok')
+            p.add_argument('--playbook-team', choices=('good', 'evil'),
+                           help='append clocktower/playbook.md to this team\'s system prompt (the other team gets none)')
             p.add_argument('--max-output', type=int, default=8000,
                            help='per-turn output ceiling, thinking included, identical for every model')
             p.add_argument('--budget', type=float, default=1000.0, help='cap on total spend in games/ledger.jsonl')
