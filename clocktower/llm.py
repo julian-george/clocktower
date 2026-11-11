@@ -27,6 +27,11 @@ from pathlib import Path
 
 import anthropic
 import ssl
+
+try:  # Beaker tracing is a dev tool: current_trace() records nothing outside a Beaker capture
+    from beaker.tracing import current_trace
+except ImportError:
+    current_trace = None
 from concurrent.futures import ThreadPoolExecutor
 
 MODEL = 'claude-opus-5-5'
@@ -460,7 +465,17 @@ class OpenAIConversation(_Base):
                 body['service_tier'] = 'flex'
             start = time.monotonic()
             async with (self.semaphore if commit else NO_LIMIT):
-                raw = await self._request(body)
+                if current_trace is None:
+                    raw = await self._request(body)
+                else:
+                    async with current_trace().model_call(operation=f'{self.label}:{(meta or {}).get("kind", "turn")}',
+                                                          provider='openai', model=self.model,
+                                                          input_messages=messages) as call:
+                        raw = await self._request(body)
+                        call.output(raw.get('output'))
+                        usage_raw = raw.get('usage') or {}
+                        call.usage(input_tokens=usage_raw.get('input_tokens'), output_tokens=usage_raw.get('output_tokens'),
+                                   cached_input_tokens=(usage_raw.get('input_tokens_details') or {}).get('cached_tokens'))
             u = raw.get('usage') or {}
             d = u.get('input_tokens_details') or {}
             read, write = d.get('cached_tokens', 0), d.get('cache_write_tokens', 0)
